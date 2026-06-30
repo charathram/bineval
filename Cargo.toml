@@ -1,0 +1,20 @@
+[package]
+name = "bineval"
+version = "0.1.0"
+edition = "2024"
+authors = ["Charath Ranganathan <charath@pragmatik.tech>"]
+license = "MIT"
+description = "Interpretable LLM evaluation via binary questions (BinEval), implemented on DSRs."
+readme = "README.md"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4.6.1", features = ["derive", "env"] }
+dotenvy = "0.15.7"
+dspy-rs = "0.7.3"
+futures = "0.3.32"
+schemars = "1.0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2.0.18"
+tokio = { version = "1.52.3", features = ["macros", "rt-multi-thread", "time"] }

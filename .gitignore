@@ -1,0 +1,6 @@
+/target
+
+# Local environment / secrets (API keys, model config)
+.env
+.env.local
+!.env.example
