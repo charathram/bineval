@@ -1,11 +1,11 @@
 # bineval
 
-An interpretable LLM-evaluation library for Rust — an implementation of **BinEval** built on
-**DSRs** ([`dspy-rs`](https://crates.io/crates/dspy-rs), the Rust rewrite of DSPy).
+An interpretable LLM-evaluation library for Rust — an implementation of **BinEval**, built on
+**[Rig](https://crates.io/crates/rig-core)** (`rig-core`).
 
 > **Ask, don't judge.** Instead of squeezing an LLM's quality into one opaque scalar, BinEval
 > decomposes an evaluation task into atomic **yes/no questions**, answers each independently, and
-> aggregates the verdicts into per-dimension and overall scores — each backed by a natural-language
+> aggregates the verdicts into an overall score — each answer backed by a natural-language
 > explanation. The result is evaluation you can **inspect, debug, and act on**.
 
 Based on *Ask, Don't Judge: Binary Questions for Interpretable LLM Evaluation and Self-Improvement*
@@ -17,22 +17,25 @@ Based on *Ask, Don't Judge: Binary Questions for Interpretable LLM Evaluation an
 
 ## Status
 
-🚧 **v1 in development.** Scope: the core of the method — **binary question generation** and
-**binary evaluation & scoring**. The paper's prompt-optimization loops (cross-model and self
-update) and benchmark reproduction are **out of scope for v1** (see the
-[PRD](docs/prd.md#6-scope-v1)).
+🚧 **v1 in development.** Scope: the minimal core — **extract requirements → binary questions →
+answer them → score**. Per-dimension scoring, prompt-optimization loops (cross-model and self
+update), and benchmark reproduction are **out of scope for v1** (see the [PRD](docs/prd.md)).
 
 ## How it works
 
-1. **Generate** a reusable `QuestionSet` from a task prompt `T` — summarize `T` into requirements,
-   then decompose them into binary questions organized by dimension (default:
-   *coherence, consistency, fluency, relevance*; fully configurable).
+1. **Generate** a reusable `QuestionSet` from a task prompt — extract the requirements an acceptable
+   output must satisfy, then decompose each requirement into minimal binary yes/no questions.
 2. **Evaluate** any `(source, output)` pair against that `QuestionSet` — each question is answered
-   independently (`yes` = requirement satisfied), and the verdicts aggregate into per-dimension and
-   overall scores in `[0, 1]` (optionally rescaled, e.g. to `1–5`).
+   (`yes` = requirement satisfied) with a natural-language explanation, and the verdicts aggregate
+   into an overall score in `[0, 1]`.
 
-A `QuestionSet` is generated once and reused across many outputs. All LLM logic is expressed through
-DSRs Signatures and Modules — there are no hand-authored prompt strings.
+A `QuestionSet` is generated once and reused across many outputs. Structured output is obtained via
+Rig's `Extractor` (tool-calling) into typed Rust structs — no hand-rolled JSON parsing — so malformed
+model output surfaces as an error, not a panic. BinEval uses two LMs: a *generator* (question
+generation) and an *evaluator* (answering).
+
+> **Note:** structured extraction relies on provider **function/tool-calling** (OpenAI and Anthropic
+> support it). OpenAI-compatible local servers without tool support are not supported.
 
 ## Install
 
@@ -51,7 +54,7 @@ file (see [Configuration](#configuration)); copy [`.env.example`](.env.example) 
 use bineval::BinEval;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> anyhow::Result<()> {
     // Loads `.env` and builds the generator + evaluator LMs from BINEVAL_* variables.
     let be = BinEval::from_env().await?;
 
@@ -61,70 +64,77 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Phase 2 — per output: score a candidate against the source.
     let report = be.evaluate(&questions, source_article, candidate_summary).await?;
 
-    println!("overall: {:.2}", report.overall);
-    for d in &report.per_dimension {
-        println!("{}: {:.2} ({}/{} answered)", d.dimension, d.score, d.answered, d.intended);
+    println!("score: {:.2}", report.score);
+    for answer in &report.answers {
+        println!("[{}] {} — {}", if answer.verdict { "yes" } else { "no" }, answer.question, answer.reasoning);
     }
     Ok(())
 }
 ```
 
-Prefer to wire models yourself? Build them explicitly (`LM` is re-exported from `dspy-rs`):
+Prefer to wire models yourself? Build the two `Lm`s explicitly from a `provider:model` spec:
 
 ```rust
-use bineval::{BinEval, LM};
+use bineval::{BinEval, Lm};
 
-let lm = LM::builder().model("openai:gpt-4o-mini".to_string()).temperature(0.0).build().await?;
-let be = BinEval::builder().generator_lm(lm).build()?;   // evaluator defaults to the generator
+// Lm::new(spec, temperature, max_tokens, api_key, base_url)
+let generator = Lm::new("openai:gpt-4o-mini", 0.0, 4096, None, None)?;
+let evaluator = Lm::new("anthropic:claude-sonnet-4-5", 0.0, 4096, None, None)?;
+let be = BinEval::new(generator, evaluator);
 ```
 
-Every score is backed by per-question verdicts and explanations in `report.per_question`, so you can
-see exactly *why* an output scored the way it did.
+Every score is backed by per-question verdicts and explanations in `report.answers`, so you can see
+exactly *why* an output scored the way it did.
 
 ## CLI
 
-Models and keys come from the environment / `.env` (see [Configuration](#configuration)).
+Models and keys come from the environment / `.env` (see [Configuration](#configuration)). Logs go to
+stderr (so JSON on stdout stays clean); pass `-v`/`-vv` to raise verbosity.
 
 ```sh
 # Generate a question set for a task (reuse it across many outputs).
-bineval generate --task task.txt --dims coherence,consistency,fluency,relevance > qs.json
+bineval generate --task task.txt --out qs.json
 
-# Evaluate an output against it (optionally rescale scores to 1–5).
-bineval evaluate --questions qs.json --source article.txt --output summary.txt --rescale 1,5 > report.json
+# Evaluate an output against it.
+bineval evaluate --questions qs.json --source article.txt --output summary.txt > report.json
+
+# Or do both in one go, with verbose logging.
+bineval -v run --task task.txt --source article.txt --output summary.txt > report.json
 ```
 
 ## Configuration
 
-BinEval uses **two** LMs — a *generator* (question generation) and an *evaluator* (`f_E`) — both
-configured from the environment. `BinEval::from_env()` and `bineval::lms_from_env()` load a `.env`
-file (real environment variables take precedence) and read these variables; each role reads
-`BINEVAL_<ROLE>_<KEY>` and falls back to the shared `BINEVAL_<KEY>` (roles: `GENERATOR`, `EVALUATOR`):
+BinEval uses **two** LMs — a *generator* (question generation) and an *evaluator* (answering) — both
+configured from the environment. `BinEval::from_env()` loads a `.env` file (real environment
+variables take precedence); each role reads `BINEVAL_<ROLE>_<KEY>` and falls back to the shared
+`BINEVAL_<KEY>` (roles: `GENERATOR`, `EVALUATOR`):
 
 | Variable | Default | Notes |
 | --- | --- | --- |
 | `BINEVAL_MODEL` | `openai:gpt-4o-mini` | `provider:model`; per-role: `BINEVAL_GENERATOR_MODEL`, `BINEVAL_EVALUATOR_MODEL` |
 | `BINEVAL_TEMPERATURE` | `0.0` | per-role overridable |
 | `BINEVAL_MAX_TOKENS` | `4096` | per-role overridable |
-| `BINEVAL_BASE_URL` | — | OpenAI-compatible / local servers (vLLM, Ollama) |
+| `BINEVAL_BASE_URL` | — | OpenAI-compatible endpoints (server must support tool-calling) |
 | `BINEVAL_API_KEY` | — | explicit key; else the provider's standard key (`OPENAI_API_KEY`, …) |
-| `BINEVAL_DIMENSIONS` | the four | comma-separated (read by `from_env`) |
-| `BINEVAL_CONCURRENCY` / `BINEVAL_MAX_RETRIES` / `BINEVAL_STRICT` | `8` / `3` / `false` | read by `from_env` |
 
 Provider API keys (e.g. `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`) are read automatically once `.env` is
 loaded. See [`.env.example`](.env.example). To use a different model per role, e.g. a stronger
 generator and a cheaper evaluator, set `BINEVAL_GENERATOR_MODEL` and `BINEVAL_EVALUATOR_MODEL`.
 
+Logging uses [`tracing`](https://crates.io/crates/tracing); set `RUST_LOG=bineval=debug` for full
+control over what the CLI emits.
+
 ## Roadmap
 
-- **v1:** question generation + evaluation/scoring (library, CLI, examples).
-- **Later:** cross-model prompt update, self prompt update, optional benchmark-reproduction harness.
+- **v1:** requirement extraction → binary questions → answering → scoring (library, CLI, example).
+- **Later:** per-dimension scoring, cross-model prompt update, self prompt update, benchmark harness.
 
-See [docs/prd.md](docs/prd.md) for the complete specification, design decisions, and rationale.
+See [docs/prd.md](docs/prd.md) for the original specification, design decisions, and rationale.
 
 ## References
 
 - Paper: [arXiv 2606.27226](https://arxiv.org/abs/2606.27226)
-- DSRs: [docs](https://dsrs.herumbshandilya.com/) · [crate](https://crates.io/crates/dspy-rs) · [repo](https://github.com/krypticmouse/DSRs)
+- Rig: [crate](https://crates.io/crates/rig-core) · [repo](https://github.com/0xPlaygrounds/rig)
 
 ## License
 
