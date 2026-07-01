@@ -1,8 +1,41 @@
 # BinEval — Product Requirements Document
 
-**Project:** `bineval` — a Rust implementation of the BinEval algorithm, built on DSRs (`dspy-rs`)
+**Project:** `bineval` — a Rust implementation of the BinEval algorithm, built on Rig (`rig-core`)
 **Status:** Draft / v1 in design
-**Last updated:** 2026-06-29
+**Last updated:** 2026-07-01
+
+---
+
+> ## ⚠️ v1 was simplified and re-based onto Rig (2026-07-01)
+>
+> The shipped v1 is a **minimal core** that diverges from the design below (which was written against
+> DSRs/`dspy-rs`). This document is retained for its background, algorithm summary, and rationale, but
+> the implementation now uses **`rig-core` directly**. Concretely:
+>
+> - **No DSRs.** We dropped `dspy-rs`: on 0.7.3 its `ChatAdapter` parses typed outputs with
+>   `serde_json::from_str(..).unwrap()` and **panicked** when gpt-4o-mini echoed the injected JSON
+>   schema before the array; the BAML fix exists only on unreleased `main` (vendored BAML + forked
+>   `facet`/`minijinja` git deps) — too unstable. BAML's `jsonish` parser isn't usable standalone.
+> - **Rig `Extractor` for structured output.** Each step defines an output struct deriving
+>   `serde` + `schemars::JsonSchema`, and Rig's `Extractor` (tool-calling) coerces the model response
+>   into it — robust, no hand-rolled JSON parsing, and malformed output errors rather than panics.
+>   Requires provider **function/tool-calling** (OpenAI/Anthropic ✓; tool-less local servers are not
+>   supported). schemars field doc-comments carry per-field intent to the model.
+> - **Hand-authored preambles.** With DSRs gone, the three operations use short preamble strings
+>   (this reverses the original "no hand-authored prompts via Signatures" goal — a deliberate trade
+>   for stability and control).
+> - **No dimensions.** Requirements and questions are a flat list; the report has a single overall
+>   `score` (fraction of "yes"), no per-dimension breakdown and no affine rescale.
+> - **Per-requirement decomposition**, run concurrently (`futures::buffered`).
+> - **`anyhow` everywhere** instead of a custom `thiserror` enum.
+> - **Two LMs retained** (generator + evaluator) behind a small provider enum (`openai`/`anthropic`),
+>   built via `BinEval::from_env` / `BinEval::new` / `Lm::new`.
+> - **CLI** has a `run` subcommand and `tracing`-based logging (`-v`/`-vv`, `RUST_LOG`).
+>
+> Current source layout: `src/llm.rs` (Rig `Lm` wrapper + `Extractor` calls + output DTOs +
+> preambles), `src/lib.rs` (`BinEval` orchestration + env config), `src/types.rs`, `src/score.rs`,
+> `src/bin/bineval.rs`, `examples/end_to_end.rs`, `tests/live.rs`. Per-dimension scoring and the
+> prompt-optimization loops remain future work.
 
 ---
 
